@@ -1,7 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 
 const EARTH_IMAGE =
   "https://images.unsplash.com/photo-1645659981907-c2142c0572b9?auto=format&fit=crop&w=1200&q=85";
+
+const API_BASE = "http://localhost:3000";
+
+type SignalType =
+  | "CHARGING"
+  | "EMERGENCY"
+  | "CRITICAL"
+  | "WARNING"
+  | "CAUTION"
+  | "NORMAL";
+
+interface BatteryReport {
+  charge: number;
+  isCharging: boolean;
+  alertCount: number;
+  badge: string;
+  signal: SignalType;
+  shouldAlert: boolean;
+  headline: string;
+  message: string;
+}
 
 function ShareIcon() {
   return (
@@ -41,9 +62,100 @@ function getInitialCharge() {
     : 12;
 }
 
+// 백엔드 서버가 꺼져 있을 때도 화면이 깨지지 않도록 동일 기준을 기본값으로 사용
+function evaluateFallback(
+  charge: number,
+  charging: boolean,
+  alertCount = 0,
+): BatteryReport {
+  if (charging) {
+    return {
+      charge,
+      isCharging: true,
+      alertCount,
+      badge: "구조 완료",
+      signal: "CHARGING",
+      shouldAlert: false,
+      headline: "220V 생명유지장치 연결 확인. 구조대가 철수합니다.",
+      message:
+        "전력 수혈이 진행 중입니다. 배터리 심박수가 정상으로 회복되고 있습니다.",
+    };
+  }
+
+  if (charge <= 5) {
+    return {
+      charge,
+      isCharging: false,
+      alertCount,
+      badge: "재난",
+      signal: "EMERGENCY",
+      shouldAlert: true,
+      headline: "메이데이! 전원 사망 1분 전, 유언을 저장하십시오!",
+      message:
+        "최후 교신입니다. 즉시 충전기를 꽂지 않으면 모든 디지털 기억이 암전됩니다.",
+    };
+  }
+
+  if (charge <= 15) {
+    return {
+      charge,
+      isCharging: false,
+      alertCount,
+      badge: "경계",
+      signal: "CRITICAL",
+      shouldAlert: true,
+      headline: "구조대가 충전기 확보를 요청합니다.",
+      message:
+        "긴급 상황!! 배터리 생존 가능성이 급격히 감소하고 있습니다. 구조대 출동.",
+    };
+  }
+
+  if (charge <= 30) {
+    return {
+      charge,
+      isCharging: false,
+      alertCount,
+      badge: "주의",
+      signal: "WARNING",
+      shouldAlert: true,
+      headline: "전력 고갈 징후 포착! 반경 15m 내 콘센트를 수색하십시오.",
+      message:
+        "제1배터리탐색구조대 출동 대기 중. 불필요한 유튜브·인스타 배터리 생존 위협 요소를 종료하세요.",
+    };
+  }
+
+  if (charge <= 60) {
+    return {
+      charge,
+      isCharging: false,
+      alertCount,
+      badge: "양호",
+      signal: "CAUTION",
+      shouldAlert: false,
+      headline: "아직 버틸 만하지만 방심은 금물입니다.",
+      message: "외출 전 보조배터리 지참 여부를 재점검하시기 바랍니다.",
+    };
+  }
+
+  return {
+    charge,
+    isCharging: false,
+    alertCount,
+    badge: "평온",
+    signal: "NORMAL",
+    shouldAlert: false,
+    headline: "배터리 생태계가 매우 평화롭습니다.",
+    message: "현재 전력 상태 이상 무. 당신의 배터리는 안전한 상태입니다.",
+  };
+}
+
 export default function App() {
   const [charge, setCharge] = useState(getInitialCharge);
   const [feedback, setFeedback] = useState<"idle" | "copied" | "shared">("idle");
+  const [report, setReport] = useState<BatteryReport>(() =>
+    evaluateFallback(getInitialCharge(), false, 0),
+  );
+  const [serverConnected, setServerConnected] = useState(false);
 
   const shareUrl = useMemo(() => {
     const url = new URL(window.location.href);
@@ -58,11 +170,87 @@ export default function App() {
     window.history.replaceState({}, "", url);
   }, [charge]);
 
+  // 슬라이더 값(charge)이 바뀔 때마다 백엔드(/api/battery)로 보내 경고 시그널 수신
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function fetchBatterySignal() {
+      try {
+        const res = await fetch(`${API_BASE}/api/battery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ charge }),
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error("Failed to fetch battery status");
+        const data = (await res.json()) as BatteryReport;
+        setReport(data);
+        setServerConnected(true);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setServerConnected(false);
+        setReport((prev) =>
+          evaluateFallback(charge, prev.isCharging, prev.alertCount),
+        );
+      }
+    }
+
+    fetchBatterySignal();
+    return () => controller.abort();
+  }, [charge]);
+
   useEffect(() => {
     if (feedback === "idle") return;
     const timer = window.setTimeout(() => setFeedback("idle"), 2200);
     return () => window.clearTimeout(timer);
   }, [feedback]);
+
+  async function toggleCharger() {
+    const nextCharging = !report.isCharging;
+    try {
+      const res = await fetch(`${API_BASE}/api/charger`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ charge, isCharging: nextCharging }),
+      });
+      if (!res.ok) throw new Error("Failed to toggle charger");
+      const data = (await res.json()) as BatteryReport;
+      setReport(data);
+      setServerConnected(true);
+    } catch {
+      setServerConnected(false);
+      setReport((prev) =>
+        evaluateFallback(charge, nextCharging, prev.alertCount),
+      );
+    }
+  }
+
+  async function sendEmergencyAlert() {
+    try {
+      const res = await fetch(`${API_BASE}/api/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ charge }),
+      });
+      if (!res.ok) throw new Error("Failed to dispatch alert");
+            const data = (await res.json()) as BatteryReport;
+
+      setReport((prev) => ({
+        ...prev,
+        ...data,
+        isCharging:
+          typeof data.isCharging === "boolean"
+            ? data.isCharging
+            : prev.isCharging,
+      }));
+      setServerConnected(true);
+    } catch {
+      setServerConnected(false);
+      setReport((prev) =>
+        evaluateFallback(charge, prev.isCharging, prev.alertCount + 1),
+      );
+    }
+  }
 
   async function copyLink() {
     try {
@@ -83,8 +271,8 @@ export default function App() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: `나의 에너지 ${charge}%`,
-          text: `지금 내 에너지는 ${charge}%예요. 링크를 열어 확인해 보세요.`,
+          title: `[${report.badge}] 나의 배터리 ${charge}%`,
+          text: `${report.headline} (현재 에너지 ${charge}%)`,
           url: shareUrl,
         });
         setFeedback("shared");
@@ -96,8 +284,14 @@ export default function App() {
     await copyLink();
   }
 
-  const status =
-    charge <= 20 ? "충전이 필요해요" : charge <= 60 ? "조금 더 갈 수 있어요" : "에너지가 충분해요";
+  const pillClass =
+    report.signal === "CHARGING"
+      ? "charging"
+      : report.signal === "EMERGENCY" || report.signal === "CRITICAL"
+        ? "critical"
+        : report.signal === "WARNING"
+          ? "warning"
+          : "";
 
   return (
     <main className="app-shell">
@@ -108,7 +302,7 @@ export default function App() {
         <div className="intro">
           <div className="eyebrow">
             <span className="live-dot" />
-            LIVE ENERGY
+            BATTERY RESCUE HQ
           </div>
           <h1 id="page-title">
             지금의 에너지를
@@ -117,7 +311,7 @@ export default function App() {
           </h1>
           <p>
             게이지를 움직여 현재 상태를 남기세요.
-            <br className="desktop-break" /> 링크를 받은 친구는 같은 수치를 바로 확인할 수 있어요.
+            <br className="desktop-break" /> 배터리 수치를 분석해 구조본부가 경보 시그널을 발령합니다.
           </p>
 
           <div className="share-card">
@@ -126,9 +320,41 @@ export default function App() {
                 <span className="card-label">공유할 에너지</span>
                 <strong>{charge}%</strong>
               </div>
-              <div className={`state-pill ${charge <= 20 ? "critical" : ""}`}>
+              <div className={`state-pill ${pillClass}`}>
                 <span />
-                {status}
+                {report.badge} · {report.signal}
+              </div>
+            </div>
+
+            <div
+              className={`rescue-box ${report.shouldAlert ? "is-urgent" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              <div className="rescue-box-top">
+                <span className="rescue-tag">구조본부 판정 시그널</span>
+                <span className={`api-badge ${serverConnected ? "online" : ""}`}>
+                  {serverConnected ? "BE 서버 연동됨" : "로컬 미리보기"}
+                </span>
+              </div>
+              <strong className="rescue-headline">{report.headline}</strong>
+              <p className="rescue-message">{report.message}</p>
+
+              <div className="rescue-actions">
+                <button
+                  type="button"
+                  className={`rescue-btn ${report.isCharging ? "active" : ""}`}
+                  onClick={toggleCharger}
+                >
+                  {report.isCharging ? "충전기 분리" : "충전기 연결"}
+                </button>
+                <button
+                  type="button"
+                  className="rescue-btn alert-btn"
+                  onClick={sendEmergencyAlert}
+                >
+                  긴급 알림 발송 ({report.alertCount}건)
+                </button>
               </div>
             </div>
 
@@ -155,7 +381,10 @@ export default function App() {
         </div>
 
         <div className="device-stage">
-          <div className="phone" style={{ "--charge": `${charge}%` } as React.CSSProperties}>
+          <div
+            className="phone"
+            style={{ "--charge": `${charge}%` } as CSSProperties}
+          >
             <div className="phone-screen">
               <img className="earth-image" src={EARTH_IMAGE} alt="" />
               <div className="screen-vignette" />
@@ -169,6 +398,13 @@ export default function App() {
                   <i className="wifi" />
                   <i className="mini-battery" />
                 </div>
+              </div>
+
+              <div
+                className={`phone-alert ${report.shouldAlert ? "urgent" : ""}`}
+              >
+                <span className="phone-alert-badge">[{report.badge}]</span>
+                <p>{report.headline}</p>
               </div>
 
               <div className="battery-wrap" aria-label={`현재 에너지 ${charge}%`}>
@@ -218,7 +454,7 @@ export default function App() {
                 max="100"
                 value={charge}
                 onChange={(event) => setCharge(Number(event.target.value))}
-                style={{ "--charge": `${charge}%` } as React.CSSProperties}
+                style={{ "--charge": `${charge}%` } as CSSProperties}
                 aria-valuetext={`${charge}퍼센트`}
               />
             </div>
