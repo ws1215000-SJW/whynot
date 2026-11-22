@@ -3,8 +3,6 @@ import { type CSSProperties, useEffect, useMemo, useState } from "react";
 const EARTH_IMAGE =
   "https://images.unsplash.com/photo-1645659981907-c2142c0572b9?auto=format&fit=crop&w=1200&q=85";
 
-const API_BASE = "http://localhost:3000";
-
 type SignalType =
   | "CHARGING"
   | "EMERGENCY"
@@ -155,7 +153,6 @@ export default function App() {
   const [report, setReport] = useState<BatteryReport>(() =>
     evaluateFallback(getInitialCharge(), false, 0),
   );
-  const [serverConnected, setServerConnected] = useState(false);
 
   const shareUrl = useMemo(() => {
     const url = new URL(window.location.href);
@@ -171,32 +168,16 @@ export default function App() {
   }, [charge]);
 
   // 슬라이더 값(charge)이 바뀔 때마다 백엔드(/api/battery)로 보내 경고 시그널 수신
+  
+  // 배터리 잔량이 변경되면 FE에서 직접 경고 단계 계산
   useEffect(() => {
-    const controller = new AbortController();
-
-    async function fetchBatterySignal() {
-      try {
-        const res = await fetch(`${API_BASE}/api/battery`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ charge }),
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error("Failed to fetch battery status");
-        const data = (await res.json()) as BatteryReport;
-        setReport(data);
-        setServerConnected(true);
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setServerConnected(false);
-        setReport((prev) =>
-          evaluateFallback(charge, prev.isCharging, prev.alertCount),
-        );
-      }
-    }
-
-    fetchBatterySignal();
-    return () => controller.abort();
+    setReport((prev) =>
+      evaluateFallback(
+        charge,
+        prev.isCharging,
+        prev.alertCount
+      )
+    );
   }, [charge]);
 
   useEffect(() => {
@@ -205,52 +186,27 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [feedback]);
 
-  async function toggleCharger() {
-    const nextCharging = !report.isCharging;
-    try {
-      const res = await fetch(`${API_BASE}/api/charger`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ charge, isCharging: nextCharging }),
-      });
-      if (!res.ok) throw new Error("Failed to toggle charger");
-      const data = (await res.json()) as BatteryReport;
-      setReport(data);
-      setServerConnected(true);
-    } catch {
-      setServerConnected(false);
-      setReport((prev) =>
-        evaluateFallback(charge, nextCharging, prev.alertCount),
-      );
-    }
+  function toggleCharger() {
+  setReport((prev) =>
+    evaluateFallback(
+      charge,
+      !prev.isCharging,
+      prev.alertCount
+    )
+  );
+}
+
+
+  function sendEmergencyAlert() {
+    setReport((prev) =>
+      evaluateFallback(
+        charge,
+        prev.isCharging,
+        prev.alertCount + 1
+      )
+    );
   }
 
-  async function sendEmergencyAlert() {
-    try {
-      const res = await fetch(`${API_BASE}/api/alert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ charge }),
-      });
-      if (!res.ok) throw new Error("Failed to dispatch alert");
-            const data = (await res.json()) as BatteryReport;
-
-      setReport((prev) => ({
-        ...prev,
-        ...data,
-        isCharging:
-          typeof data.isCharging === "boolean"
-            ? data.isCharging
-            : prev.isCharging,
-      }));
-      setServerConnected(true);
-    } catch {
-      setServerConnected(false);
-      setReport((prev) =>
-        evaluateFallback(charge, prev.isCharging, prev.alertCount + 1),
-      );
-    }
-  }
 
   async function copyLink() {
     try {
@@ -333,9 +289,6 @@ export default function App() {
             >
               <div className="rescue-box-top">
                 <span className="rescue-tag">구조본부 판정 시그널</span>
-                <span className={`api-badge ${serverConnected ? "online" : ""}`}>
-                  {serverConnected ? "BE 서버 연동됨" : "로컬 미리보기"}
-                </span>
               </div>
               <strong className="rescue-headline">{report.headline}</strong>
               <p className="rescue-message">{report.message}</p>
